@@ -1,0 +1,22 @@
+# Core Ray packages
+ray[default]==2.9.0
+ray[tune]==2.9.0
+
+# PyTorch (CUDA 12.1)
+torch>=2.1.0
+torchvision>=0.16.0
+
+# Transformers for LLM work
+transformers>=4.36.0
+accelerate>=0.25.0
+peft>=0.7.0  # Parameter-efficient fine-tuning (LoRA)
+
+# RL-specific
+trl>=0.7.0  # Transformer RL library (has PPO for LLMs)
+datasets>=2.15.0
+
+# Utilities
+numpy>=1.24.0
+pandas>=2.0.0
+tqdm>=4.66.0
+wandb>=0.16.0  # Experiment tracking

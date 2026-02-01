@@ -1,0 +1,27 @@
+# Development stack configuration
+# These values are intentionally conservative for learning/cost control
+
+config:
+  # GCP Configuration
+  gcp:project: your-gcp-project-id   # CHANGE THIS
+  gcp:region: us-central1
+  gcp:zone: us-central1-a
+
+  # Cluster Configuration
+  aura-rl-cluster:clusterName: aura-rl-dev
+  aura-rl-cluster:kubernetesVersion: "1.28"
+
+  # Node Pool Sizing (conservative for learning)
+  aura-rl-cluster:cpuPoolConfig:
+    minNodes: 1
+    maxNodes: 3
+    machineType: n2-standard-4    # 4 vCPU, 16GB RAM
+    preemptible: true             # 60-80% cheaper
+
+  aura-rl-cluster:gpuPoolConfig:
+    minNodes: 0                   # Scale to zero when idle
+    maxNodes: 2
+    machineType: n1-standard-8    # 8 vCPU, 30GB RAM (required for GPU)
+    acceleratorType: nvidia-tesla-t4
+    acceleratorCount: 1
+    preemptible: true             # T4 spot is ~$0.11/hr vs $0.35/hr
