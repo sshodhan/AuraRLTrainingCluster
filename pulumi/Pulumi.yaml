@@ -1,0 +1,15 @@
+name: aura-rl-cluster
+runtime: nodejs
+description: |
+  RL Training Cluster on GKE with Ray
+
+  This project creates:
+  - GKE cluster with CPU and GPU node pools
+  - KubeRay operator for Ray cluster management
+  - Supporting infrastructure (VPC, service accounts)
+
+config:
+  pulumi:tags:
+    value:
+      project: aura-rl-training
+      environment: dev

@@ -1,0 +1,252 @@
+# =============================================================================
+# RAY CLUSTER MANIFEST
+# =============================================================================
+# This is a sample RayCluster custom resource for RLHF-style workloads.
+#
+# Apply after KubeRay operator is installed:
+#   kubectl apply -f ray-cluster.yaml
+#
+# Key Concepts:
+# - headGroupSpec: Single head node for coordination, GCS, dashboard
+# - workerGroupSpecs: Multiple groups with different resource profiles
+# - Autoscaling: Ray can scale workers based on task queue depth
+
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: rlhf-cluster
+  namespace: default
+  labels:
+    app: rlhf-training
+    environment: dev
+spec:
+  rayVersion: "2.9.0"
+
+  # ---------------------------------------------------------------------------
+  # AUTOSCALING CONFIGURATION
+  # ---------------------------------------------------------------------------
+  # In-tree autoscaling uses Ray's built-in autoscaler.
+  # It monitors pending tasks and spins up/down workers accordingly.
+  enableInTreeAutoscaling: true
+
+  autoscalerOptions:
+    # How often to check if we need more workers
+    upscalingMode: Default
+    idleTimeoutSeconds: 60  # Scale down after 60s of idle
+
+    # Resource limits for the autoscaler sidecar
+    resources:
+      requests:
+        cpu: "200m"
+        memory: "256Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+
+  # ---------------------------------------------------------------------------
+  # HEAD NODE
+  # ---------------------------------------------------------------------------
+  # The head node runs:
+  # - Global Control Store (GCS): Cluster state, actor registry
+  # - Dashboard: Web UI for monitoring
+  # - Driver: If you submit jobs via `ray job submit`
+  #
+  # Best Practice: Head should NOT run compute tasks (num-cpus: 0)
+  headGroupSpec:
+    rayStartParams:
+      dashboard-host: "0.0.0.0"
+      num-cpus: "0"  # Reserve head for coordination only
+
+    template:
+      metadata:
+        labels:
+          ray.io/node-type: head
+      spec:
+        containers:
+          - name: ray-head
+            image: rayproject/ray:2.9.0
+            imagePullPolicy: IfNotPresent
+
+            resources:
+              requests:
+                cpu: "2"
+                memory: "4Gi"
+              limits:
+                cpu: "4"
+                memory: "8Gi"
+
+            ports:
+              - containerPort: 6379   # GCS server
+                name: gcs
+              - containerPort: 8265   # Dashboard
+                name: dashboard
+              - containerPort: 10001  # Ray client server
+                name: client
+              - containerPort: 8000   # Serve (if using Ray Serve)
+                name: serve
+
+            # Lifecycle hook for graceful shutdown
+            lifecycle:
+              preStop:
+                exec:
+                  command: ["/bin/sh", "-c", "ray stop"]
+
+            # Volume mounts for logs and shared storage
+            volumeMounts:
+              - name: ray-logs
+                mountPath: /tmp/ray
+
+        volumes:
+          - name: ray-logs
+            emptyDir: {}
+
+        # Prefer scheduling on CPU nodes (head doesn't need GPU)
+        affinity:
+          nodeAffinity:
+            preferredDuringSchedulingIgnoredDuringExecution:
+              - weight: 100
+                preference:
+                  matchExpressions:
+                    - key: workload-type
+                      operator: In
+                      values:
+                        - cpu
+
+  # ---------------------------------------------------------------------------
+  # WORKER GROUPS
+  # ---------------------------------------------------------------------------
+  # You can define multiple worker groups with different resources.
+  # Common pattern for RLHF:
+  # - CPU workers: Environment rollouts, data preprocessing
+  # - GPU workers: Model training, inference
+  workerGroupSpecs:
+    # -------------------------------------------------------------------------
+    # CPU Worker Group
+    # -------------------------------------------------------------------------
+    # For compute that doesn't need GPUs:
+    # - Generating experiences (env.step())
+    # - Data preprocessing
+    # - Reward computation (if not using neural reward model)
+    - groupName: cpu-workers
+      replicas: 2
+      minReplicas: 0
+      maxReplicas: 8
+
+      rayStartParams:
+        # Number of CPUs this worker exposes to Ray
+        num-cpus: "4"
+
+      template:
+        metadata:
+          labels:
+            ray.io/node-type: worker
+            ray.io/worker-group: cpu
+        spec:
+          containers:
+            - name: ray-worker
+              image: rayproject/ray:2.9.0
+              imagePullPolicy: IfNotPresent
+
+              resources:
+                requests:
+                  cpu: "4"
+                  memory: "8Gi"
+                limits:
+                  cpu: "4"
+                  memory: "12Gi"
+
+              lifecycle:
+                preStop:
+                  exec:
+                    command: ["/bin/sh", "-c", "ray stop"]
+
+          # Target CPU node pool
+          nodeSelector:
+            workload-type: cpu
+
+    # -------------------------------------------------------------------------
+    # GPU Worker Group
+    # -------------------------------------------------------------------------
+    # For GPU-accelerated compute:
+    # - Neural network forward/backward pass
+    # - Model inference for action sampling
+    # - Policy gradient updates
+    - groupName: gpu-workers
+      replicas: 1
+      minReplicas: 0
+      maxReplicas: 4
+
+      rayStartParams:
+        num-cpus: "4"
+        num-gpus: "1"
+
+      template:
+        metadata:
+          labels:
+            ray.io/node-type: worker
+            ray.io/worker-group: gpu
+        spec:
+          containers:
+            - name: ray-worker
+              # GPU image has CUDA toolkit
+              image: rayproject/ray:2.9.0-gpu
+              imagePullPolicy: IfNotPresent
+
+              resources:
+                requests:
+                  cpu: "4"
+                  memory: "16Gi"
+                  nvidia.com/gpu: "1"  # GPU request
+                limits:
+                  cpu: "8"
+                  memory: "32Gi"
+                  nvidia.com/gpu: "1"  # GPU limit (must equal request)
+
+              env:
+                # Ensure CUDA is visible
+                - name: NVIDIA_VISIBLE_DEVICES
+                  value: "all"
+                - name: NVIDIA_DRIVER_CAPABILITIES
+                  value: "compute,utility"
+
+              lifecycle:
+                preStop:
+                  exec:
+                    command: ["/bin/sh", "-c", "ray stop"]
+
+          # Target GPU node pool
+          nodeSelector:
+            workload-type: gpu
+
+          # Tolerate GPU node taint
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Exists
+              effect: NoSchedule
+
+---
+# =============================================================================
+# SERVICES
+# =============================================================================
+# Expose Ray services for external access
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: rlhf-cluster-head-svc
+  namespace: default
+spec:
+  selector:
+    ray.io/cluster: rlhf-cluster
+    ray.io/node-type: head
+  ports:
+    - name: dashboard
+      port: 8265
+      targetPort: 8265
+    - name: client
+      port: 10001
+      targetPort: 10001
+    - name: serve
+      port: 8000
+      targetPort: 8000
+  type: ClusterIP  # Change to LoadBalancer for external access
